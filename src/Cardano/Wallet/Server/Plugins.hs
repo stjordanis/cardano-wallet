@@ -58,6 +58,9 @@ import           Cardano.Wallet.WalletLayer (ActiveWalletLayer,
                      PassiveWalletLayer)
 import qualified Cardano.Wallet.WalletLayer.Kernel as WalletLayer.Kernel
 
+import           Data.Reflection (Given (..))
+import           Pos.Chain.Ssc (SscConfiguration, sscConfiguration)
+import           Pos.Chain.Update (cpsSoftwareVersion)
 import           Pos.Infra.Diffusion.Types (Diffusion (..))
 import           Pos.Infra.Shutdown (HasShutdownContext (shutdownContext),
                      ShutdownContext)
@@ -67,6 +70,10 @@ import           Pos.Util.Wlog (logError, logInfo, modifyLoggerName,
                      usingLoggerName)
 import           Pos.Web (serveDocImpl, serveImpl)
 import qualified Pos.Web.Server
+
+
+instance Given SscConfiguration where
+    given = sscConfiguration
 
 -- A @Plugin@ running in the monad @m@.
 type Plugin m = Diffusion m -> m ()

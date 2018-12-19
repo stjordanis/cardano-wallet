@@ -7,9 +7,30 @@ import           Universum
 import qualified Cardano.Wallet.Client.Http as Client
 import           Test.Integration.Framework.DSL
 
+import           Cardano.Cluster.Util (oneSecond)
+import           Control.Concurrent (threadDelay)
 
 spec :: Scenarios Context
 spec = do
+
+    scenario "applyBlocks test" $ do
+        fixture <- setup $ defaultSetup
+            & initialCoins .~ [1000000]
+
+        response <- request $ Client.postTransaction $- Payment
+            (defaultSource fixture)
+            (defaultDistribution 14 fixture)
+            defaultGroupingPolicy
+            noSpendingPassword
+
+        liftIO $ threadDelay $ 120 * oneSecond
+
+        verify response
+            [ expectTxInHistoryOf (fixture ^. wallet)
+            , expectTxStatusEventually [InNewestBlocks, Persisted]
+            ]
+
+
     scenario "successful payment appears in the history" $ do
         fixture <- setup $ defaultSetup
             & initialCoins .~ [1000000]

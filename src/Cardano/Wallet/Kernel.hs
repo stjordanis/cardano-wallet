@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-type-defaults #-}
 -- | The kernel of the wallet implementation
 --
 -- The goal is to keep this module mostly self-contained, and not use to many
@@ -30,10 +31,13 @@ import           Control.Concurrent.Async (async, cancel)
 import           Data.Acid (AcidState, createArchive, createCheckpoint,
                      openLocalStateFrom)
 import           Data.Acid.Memory (openMemoryState)
+import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import           System.Directory (doesPathExist, removePathForcibly)
 
+import           Pos.Chain.Block (HeaderHash, getBlockHeader, headerHash)
 import           Pos.Chain.Txp (TxAux (..))
+import           Pos.Core.Chrono (OldestFirst (..))
 import           Pos.Crypto (ProtocolMagic)
 import           Pos.Infra.InjectFail (FInjects)
 import           Pos.Util.Wlog (Severity (..))
@@ -44,12 +48,15 @@ import           Cardano.Wallet.Kernel.DB.TxMeta
 import           Cardano.Wallet.Kernel.Diffusion (WalletDiffusion (..))
 import           Cardano.Wallet.Kernel.Internal
 import           Cardano.Wallet.Kernel.Keystore (Keystore)
-import           Cardano.Wallet.Kernel.NodeStateAdaptor (NodeStateAdaptor)
+import           Cardano.Wallet.Kernel.NodeStateAdaptor (NodeStateAdaptor,
+                     getCoreConfig)
 import           Cardano.Wallet.Kernel.Pending (cancelPending)
 import           Cardano.Wallet.Kernel.Read (getWalletSnapshot)
 import           Cardano.Wallet.Kernel.Submission (WalletSubmission,
                      addPendings, emptyWalletSubmission, tick)
-import           Cardano.Wallet.Kernel.Submission.Worker (tickSubmissionLayer)
+import           Cardano.Wallet.Kernel.Submission.Worker (tickDiffusionLayer,
+                     tickSubmissionLayer)
+--import           UTxO.Context (CardanoContext (..), initCardanoContext
 import qualified Cardano.Wallet.Kernel.Util.Strict as Strict
 
 {-------------------------------------------------------------------------------
@@ -207,11 +214,19 @@ bracketActiveWallet walletPassive
       tickSubmissionLayer
         (walletPassive ^. walletLogMessage)
         (tickFunction (walletPassive ^. walletSubmission))
+
+    applyingBlockTicker <- liftIO $ async $
+       tickDiffusionLayer
+        (walletPassive ^. walletLogMessage)
+        tickDiffusionFunction
+        ([],[])
+
     bracket
       (return ActiveWallet{..})
       (\_ -> liftIO $ do
                  (_walletLogMessage walletPassive) Error "stopping the wallet submission layer..."
                  cancel submissionLayerTicker
+                 cancel applyingBlockTicker
       )
       runActiveWallet
     where
@@ -240,3 +255,26 @@ bracketActiveWallet walletPassive
                     return (state', s)
             -- This can`t change the state of the wallet, so it`s left outside the MVar IO action.
             sendTransactions toSend
+
+        tickDiffusionFunction
+            :: ([HeaderHash], [HeaderHash])
+            -> IO ([HeaderHash], [HeaderHash])
+        tickDiffusionFunction (inProgressHeader, consumedHeader) = do
+            let nodeState = walletPassive ^. walletNode
+            nodeBlockHeaderMap <- walletRequestTip walletDiffusion
+            let [(nodeId, headerIO)] = Map.toList nodeBlockHeaderMap
+            header <- headerIO
+            void $ print "-------------- tick"
+            _ <- getCoreConfig nodeState
+
+            case inProgressHeader of
+                [h1, h2] -> do
+                    blocksDowloaded <- walletGetBlocks walletDiffusion nodeId h2 (take 1 consumedHeader)
+                    let accomodatedHeaders =  map (headerHash . getBlockHeader) $ getOldestFirst blocksDowloaded
+                    void $ print "-------------- accomodatedHeaders :  "
+                    void $ print accomodatedHeaders
+                    void $ print "-------------- end tick 1 "
+                    pure $ ([h1], (reverse accomodatedHeaders) ++ consumedHeader)
+                _ -> do
+                    void $ print "-------------- end tick 2 "
+                    pure $ (List.nub $ (headerHash header) : inProgressHeader, consumedHeader)
