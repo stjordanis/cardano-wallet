@@ -23,6 +23,7 @@ spec = do
             defaultGroupingPolicy
             noSpendingPassword
 
+        --need this to see transition between epochs
         liftIO $ threadDelay $ 120 * oneSecond
 
         verify response
