@@ -74,10 +74,10 @@ fromDiffusion nat d = WalletDiffusion {
                     -> [Block]
                     -> m (OldestFirst [] Block)
                 getPrevBlock nodeId from toMaybe blocksInThisBatch = do
-                    void $ print "*********"
-                    void $ print from
-                    void $ print toMaybe
-                    void $ print "*********"
+                    --void $ print "*********"
+                    --void $ print from
+                    --void $ print toMaybe
+                    --void $ print "*********"
                     downloadedBlock <- getBlocks d nodeId from [from]
                     let downloadedBlockStripped = getOldestFirst downloadedBlock
                     --void $ print toMaybe

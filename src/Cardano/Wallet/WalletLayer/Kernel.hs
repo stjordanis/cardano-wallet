@@ -17,8 +17,8 @@ import           Data.Foldable (for_)
 import           Formatting ((%))
 import qualified Formatting as F
 
-import           Pos.Chain.Block (Blund, blockHeader, getBlockHeader,
-                     headerHash, prevBlockL)
+--import           Pos.Chain.Block (Blund, blockHeader, getBlockHeader,
+import           Pos.Chain.Block (Blund, blockHeader, headerHash, prevBlockL)
 import           Pos.Chain.Genesis (Config (..))
 import           Pos.Core.Chrono (OldestFirst (..))
 import           Pos.Crypto (ProtocolMagic)
@@ -84,19 +84,21 @@ bracketPassiveWallet pm mode logFunction keystore node fInjects f = do
       -- Start the wallet worker
       let wai = Actions.WalletActionInterp
                  { Actions.applyBlocks = \blunds -> do
+                    --return ()
+
                     ls <- mapM (Wallets.blundToResolvedBlock node)
                         (toList (getOldestFirst blunds))
                     --let mp = Debug.trace (("WalletActionInterp:\n " <> show blunds)::String) $ catMaybes ls
                     --let bs = map (\(b,_)-> b) $ toList (getOldestFirst blunds) ---
                     --let hash = map (\(b,_)-> view mainBlockSlot b) $ toList (getOldestFirst blunds) ---
                     --let bs = map (\(_,u)-> u) $ toList (getOldestFirst blunds) ---
-                    let bs = map (\(b,_)-> (headerHash . getBlockHeader) b) $ toList (getOldestFirst blunds) ---
-                    let mp = Debug.trace (("####### WalletActionInterp:\n" <> show bs)::String) $ catMaybes ls
+                    --let bs = map (\(b,_)-> (headerHash . getBlockHeader) b) $ toList (getOldestFirst blunds) ---
+                    --let mp = Debug.trace (("####### WalletActionInterp:\n" <> show bs)::String) $ catMaybes ls
                     {--let resolved = map (\b -> case b of
                                                (Just block) -> _rbTxs block
                                                Nothing      -> []
-                                       ) ls
-                    let mp = Debug.trace (("####### WalletActionInterp:\n" <> show resolved)::String) $ catMaybes ls--}
+                                       ) ls--}
+                    let mp = Debug.trace (("####### WalletActionInterp:\n" <> show ls)::String) $ catMaybes ls
                     --let mp = catMaybes ls
                     mapM_ (Kernel.applyBlock w) mp
 

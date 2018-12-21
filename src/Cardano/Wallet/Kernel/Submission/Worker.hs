@@ -10,7 +10,9 @@ import           Formatting (sformat, (%))
 import qualified Formatting as F
 
 import           Pos.Chain.Block (HeaderHash)
+import           Pos.Chain.Txp (Utxo)
 import           Pos.Util.Wlog (Severity (..))
+
 
 tickSubmissionLayer :: forall m. (MonadCatch m, MonadIO m)
                     => (Severity -> Text -> m ())
@@ -49,11 +51,11 @@ tickRate = 5000000
 tickDiffusionLayer :: forall m. (MonadCatch m, MonadIO m)
                    => (Severity -> Text -> m ())
                       -- ^ A logging function
-                   -> (([HeaderHash],[HeaderHash]) -> m ([HeaderHash],[HeaderHash]))
+                   -> ((([HeaderHash],[HeaderHash]),Utxo) -> m (([HeaderHash],[HeaderHash]), Utxo))
                       -- ^ A function to call at each 'tick' of the worker.
                       -- This callback will be responsible for doing any pre
                       -- and post processing of the state.
-                   -> ([HeaderHash],[HeaderHash])
+                   -> (([HeaderHash],[HeaderHash]),Utxo)
                    -> m ()
 tickDiffusionLayer logFunction tick start =
     go start `catch` (\(e :: SomeException) ->
@@ -61,7 +63,7 @@ tickDiffusionLayer logFunction tick start =
                    in logFunction Error (sformat msg e)
                )
     where
-      go :: ([HeaderHash],[HeaderHash]) -> m ()
+      go :: (([HeaderHash],[HeaderHash]), Utxo) -> m ()
       go previousOutput  = do
           logFunction Debug "ticking the slot in the diffusion layer..."
           currentOutput <- tick previousOutput

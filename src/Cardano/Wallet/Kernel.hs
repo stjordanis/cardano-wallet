@@ -32,18 +32,28 @@ import           Data.Acid (AcidState, createArchive, createCheckpoint,
                      openLocalStateFrom)
 import           Data.Acid.Memory (openMemoryState)
 import qualified Data.List as List
+import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import qualified Data.Strict.Maybe as StrictMaybe
 import           System.Directory (doesPathExist, removePathForcibly)
 
-import           Pos.Chain.Block (HeaderHash, getBlockHeader, headerHash)
-import           Pos.Chain.Txp (TxAux (..))
+import           Pos.Chain.Block (HeaderHash, getBlockHeader, headerHash,
+                     mainBlockSlot, mainBlockTxPayload)
+import           Pos.Chain.Txp (Tx (..), TxAux (..), TxIn (..), Utxo, txpTxs,
+                     utxoToLookup)
+import           Pos.Core (getCurrentTimestamp)
 import           Pos.Core.Chrono (OldestFirst (..))
 import           Pos.Crypto (ProtocolMagic)
 import           Pos.Infra.InjectFail (FInjects)
 import           Pos.Util.Wlog (Severity (..))
 
 import           Cardano.Wallet.Kernel.DB.AcidState (DB, defDB)
+import           Cardano.Wallet.Kernel.DB.BlockContext (BlockContext (..))
+import           Cardano.Wallet.Kernel.DB.InDb
 import           Cardano.Wallet.Kernel.DB.Read (pendingByAccount)
+import           Cardano.Wallet.Kernel.DB.Resolved (ResolvedBlock (..),
+                     ResolvedTx (..))
 import           Cardano.Wallet.Kernel.DB.TxMeta
 import           Cardano.Wallet.Kernel.Diffusion (WalletDiffusion (..))
 import           Cardano.Wallet.Kernel.Internal
@@ -56,8 +66,10 @@ import           Cardano.Wallet.Kernel.Submission (WalletSubmission,
                      addPendings, emptyWalletSubmission, tick)
 import           Cardano.Wallet.Kernel.Submission.Worker (tickDiffusionLayer,
                      tickSubmissionLayer)
---import           UTxO.Context (CardanoContext (..), initCardanoContext
+import           Cardano.Wallet.Kernel.Util.Core (txOuts, utxoRemoveInputs,
+                     utxoUnions)
 import qualified Cardano.Wallet.Kernel.Util.Strict as Strict
+import           UTxO.Context (CardanoContext (..), initCardanoContext)
 
 {-------------------------------------------------------------------------------
   Passive Wallet Resource Management
@@ -215,11 +227,14 @@ bracketActiveWallet walletPassive
         (walletPassive ^. walletLogMessage)
         (tickFunction (walletPassive ^. walletSubmission))
 
+    genesisConfig <- liftIO $ getCoreConfig $ walletPassive ^. walletNode
+    let initialUtxo = ccUtxo $ initCardanoContext genesisConfig
+
     applyingBlockTicker <- liftIO $ async $
        tickDiffusionLayer
         (walletPassive ^. walletLogMessage)
         tickDiffusionFunction
-        ([],[])
+        (([],[]), initialUtxo)
 
     bracket
       (return ActiveWallet{..})
@@ -257,24 +272,88 @@ bracketActiveWallet walletPassive
             sendTransactions toSend
 
         tickDiffusionFunction
-            :: ([HeaderHash], [HeaderHash])
-            -> IO ([HeaderHash], [HeaderHash])
-        tickDiffusionFunction (inProgressHeader, consumedHeader) = do
-            let nodeState = walletPassive ^. walletNode
+            :: (([HeaderHash], [HeaderHash]), Utxo)
+            -> IO (([HeaderHash], [HeaderHash]), Utxo)
+        tickDiffusionFunction ((inProgressHeader, consumedHeader),utxo) = do
             nodeBlockHeaderMap <- walletRequestTip walletDiffusion
             let [(nodeId, headerIO)] = Map.toList nodeBlockHeaderMap
             header <- headerIO
             void $ print "-------------- tick"
-            _ <- getCoreConfig nodeState
 
             case inProgressHeader of
                 [h1, h2] -> do
                     blocksDowloaded <- walletGetBlocks walletDiffusion nodeId h2 (take 1 consumedHeader)
                     let accomodatedHeaders =  map (headerHash . getBlockHeader) $ getOldestFirst blocksDowloaded
-                    void $ print "-------------- accomodatedHeaders :  "
-                    void $ print accomodatedHeaders
+                    --void $ print "currentHeaders :  "
+                    --void $ print accomodatedHeaders
+                    --let prevHeaders =  map (\block -> block ^. prevBlockL) $ getOldestFirst blocksDowloaded
+                    -- TO-DO what if GenesisBlock is in the middle
+                    -- now handle the case if it is the oldest
+                    --void $ print "prevHeaders :  "
+                    let prevHeaders = case consumedHeader of
+                                          [] -> (take 1 accomodatedHeaders) ++ ((reverse . drop 1 . reverse) accomodatedHeaders)
+                                          cs -> (take 1 cs) ++ ((reverse . drop 1 . reverse) accomodatedHeaders)
+                    --void $ print prevHeaders
+                    let slotId = map (\genericBlock -> case genericBlock of
+                                                           Right block -> Just $ block ^. mainBlockSlot
+                                                           Left _  -> Nothing
+                                     )
+                                 $ getOldestFirst blocksDowloaded
+                    --void $ print "slotId :  "
+                    --void $ print slotId
+                    -- TO DO make sure utxo is updated every pass, no in the end
+                    let txPayload = map (\genericBlock -> case genericBlock of
+                                                           Right block ->
+                                                               let transactionsInBlock = block ^. mainBlockTxPayload . txpTxs
+                                                                   outputs = utxoUnions $ map txOuts transactionsInBlock
+                                                                   inputs = map _txInputs transactionsInBlock
+                                                                   inputsToRemove = concat $ map toList inputs
+                                                                   findUtxo = utxoToLookup utxo
+                                                                   inputsE = concat $ map (catMaybes . map findUtxo) $ map toList inputs
+                                                               in Just (inputsToRemove, (inputsE, outputs))
+                                                           Left _  -> Nothing
+                                        )
+                                    $ getOldestFirst blocksDowloaded
+                    --void $ print "txPayload :  "
+                    --void $ print txPayload
+                    now <- getCurrentTimestamp
+                    --void $ print now
+                    let createBlockContext arg1 arg2 arg3 =
+                            if (arg2 == arg3) then
+                                BlockContext (InDb $ arg1) (InDb $ arg2) (StrictMaybe.Nothing)
+                            else
+                                BlockContext (InDb $ arg1) (InDb $ arg2) (StrictMaybe.Just (InDb $ arg3))
+                    let context = List.zipWith3 createBlockContext (catMaybes slotId) accomodatedHeaders prevHeaders
+                    --void $ print context
+                    let createResolvedTx txIn payload time =
+                            let resolvedTxIn = fst payload
+                                resolvedTxOut = (fst . snd) payload
+                                theUtxo = (snd . snd) payload
+                            in ResolvedTx (InDb $ NonEmpty.fromList $ zip resolvedTxIn resolvedTxOut) (InDb theUtxo) (InDb $ (txIn,time))
+                    let  resolvedTxs =
+                             map (\payload -> case List.nub (fst payload) of
+                                                  [(TxInUtxo justOne _)]  -> Just $ createResolvedTx justOne payload now
+                                                  _ -> Nothing
+                                          ) $ catMaybes txPayload
+                    --void $ print resolvedTxs
+                    let createResolvedBlock resTx bCtx =
+                            case resTx of
+                                Just resolvedTx ->
+                                    let (_, timestamp) = _fromDb $ _rtxMeta resolvedTx
+                                    in ResolvedBlock [resolvedTx] bCtx timestamp
+                                Nothing  ->
+                                    ResolvedBlock [] bCtx now
+                    let resolvedBlocks = List.zipWith createResolvedBlock resolvedTxs context
+                    void $ print resolvedBlocks
+
+                    --mapM_ (Kernel.applyBlock walletPassive) resolvedBlocks
+
                     void $ print "-------------- end tick 1 "
-                    pure $ ([h1], (reverse accomodatedHeaders) ++ consumedHeader)
+                    let utxoToAdd = map (snd . snd) $ catMaybes txPayload
+                    let utxoAfterAddition = utxoUnions $ utxo : utxoToAdd
+                    let utxoSetToDel = Set.fromList $ concat $ map fst $ catMaybes txPayload
+                    let updatedUtxo = utxoRemoveInputs utxoAfterAddition utxoSetToDel
+                    pure $ (([h1], (reverse accomodatedHeaders) ++ consumedHeader), updatedUtxo)
                 _ -> do
                     void $ print "-------------- end tick 2 "
-                    pure $ (List.nub $ (headerHash header) : inProgressHeader, consumedHeader)
+                    pure $ ((List.nub $ (headerHash header) : inProgressHeader, consumedHeader), utxo)
