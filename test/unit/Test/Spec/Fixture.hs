@@ -16,6 +16,7 @@ import           Universum
 
 import           Pos.Util.Wlog (Severity)
 
+import           Pos.Core.Chrono (OldestFirst (..))
 import           Pos.Crypto (ProtocolMagic)
 import           Pos.Infra.InjectFail (mkFInjects)
 
@@ -101,4 +102,6 @@ withActiveWalletFixture pm prepareFixtures cc = do
         diffusion = Kernel.WalletDiffusion {
             walletSendTx                = \_tx -> return False
           , walletGetSubscriptionStatus = return mempty
+          , walletRequestTip            = return mempty
+          , walletGetBlocks             = \_nodeId _hashId _checkpointHashIds -> return $ OldestFirst []
           }

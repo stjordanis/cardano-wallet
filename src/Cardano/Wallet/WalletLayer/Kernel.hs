@@ -31,7 +31,6 @@ import           Pos.Core (getCurrentTimestamp)
 import           Pos.Core.Chrono (OldestFirst (..))
 import           Pos.Crypto (ProtocolMagic)
 import           Pos.Infra.InjectFail (FInjects)
-import           Pos.Util.Wlog (Severity (Debug, Warning))
 import           Pos.Util.Wlog (Severity (..))
 import           UTxO.Context (CardanoContext (..), initCardanoContext)
 
@@ -238,31 +237,31 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
                     --void $ print "currentHeaders :  "
                     --void $ print accomodatedHeaders
                     --let prevHeaders =  map (\block -> block ^. prevBlockL) $ getOldestFirst blocksDowloaded
-                    -- TO-DO what if GenesisBlock is in the middle
+                -- TO-DO what if GenesisBlock is in the middle
                     -- now handle the case if it is the oldest
                     --void $ print "prevHeaders :  "
                 let prevHeaders = case consumedHeader of
                                       [] -> (take 1 accomodatedHeaders) ++ ((reverse . drop 1 . reverse) accomodatedHeaders)
                                       cs -> (take 1 cs) ++ ((reverse . drop 1 . reverse) accomodatedHeaders)
                     --void $ print prevHeaders
-                let slotId = map (\genericBlock -> case genericBlock of
-                                                       Right block -> Just $ block ^. mainBlockSlot
-                                                       Left _  -> Nothing
+                let slotId = map (\case
+                                         Right block -> Just $ block ^. mainBlockSlot
+                                         Left _  -> Nothing
                                  )
                              $ getOldestFirst blocksDowloaded
                     --void $ print "slotId :  "
                     --void $ print slotId
-                    -- TO DO make sure utxo is updated every pass, no in the end
-                let txPayload = map (\genericBlock -> case genericBlock of
-                                                          Right block ->
-                                                              let transactionsInBlock = block ^. mainBlockTxPayload . txpTxs
-                                                                  outputs = utxoUnions $ map txOuts transactionsInBlock
-                                                                  inputs = map _txInputs transactionsInBlock
-                                                                  inputsToRemove = concat $ map toList inputs
-                                                                  findUtxo = utxoToLookup utxo
-                                                                  inputsE = concat $ map (catMaybes . map findUtxo) $ map toList inputs
-                                                              in Just (inputsToRemove, (inputsE, outputs))
-                                                          Left _  -> Nothing
+                -- TO DO make sure utxo is updated every pass, no in the end
+                let txPayload = map (\case
+                                            Right block ->
+                                                let transactionsInBlock = block ^. mainBlockTxPayload . txpTxs
+                                                    outputs = utxoUnions $ map txOuts transactionsInBlock
+                                                    inputs = map _txInputs transactionsInBlock
+                                                    inputsToRemove = concatMap toList inputs
+                                                    findUtxo = utxoToLookup utxo
+                                                    inputsE = concatMap ((mapMaybe findUtxo) . toList) inputs
+                                                in Just (inputsToRemove, (inputsE, outputs))
+                                            Left _  -> Nothing
                                     )
                                 $ getOldestFirst blocksDowloaded
                     --void $ print "txPayload :  "
@@ -302,7 +301,7 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
                 --void $ print "-------------- end tick 1 "
                 let utxoToAdd = map (snd . snd) $ catMaybes txPayload
                 let utxoAfterAddition = utxoUnions $ utxo : utxoToAdd
-                let utxoSetToDel = Set.fromList $ concat $ map fst $ catMaybes txPayload
+                let utxoSetToDel = Set.fromList $ concatMap fst (catMaybes txPayload)
                 let updatedUtxo = utxoRemoveInputs utxoAfterAddition utxoSetToDel
                 pure $ (([h1], (reverse accomodatedHeaders) ++ consumedHeader), updatedUtxo)
             _ -> do
