@@ -103,9 +103,9 @@ bracketPassiveWallet pm mode logFunction keystore node fInjects f = do
                  --{ Actions.applyBlocks = \blunds -> do
                 { Actions.applyBlocks = \_ -> do
                     return ()
-{--
-                    ls <- mapM (Wallets.blundToResolvedBlock node)
-                        (toList (getOldestFirst blunds))
+
+                    --ls <- mapM (Wallets.blundToResolvedBlock node)
+                    --    (toList (getOldestFirst blunds))
                     --let mp = Debug.trace (("WalletActionInterp:\n " <> show blunds)::String) $ catMaybes ls
                     --let bs = map (\(b,_)-> b) $ toList (getOldestFirst blunds) ---
                     --let hash = map (\(b,_)-> view mainBlockSlot b) $ toList (getOldestFirst blunds) ---
@@ -116,10 +116,13 @@ bracketPassiveWallet pm mode logFunction keystore node fInjects f = do
                                                (Just block) -> _rbTxs block
                                                Nothing      -> []
                                        ) ls--}
-                    let mp = Debug.trace (("####### WalletActionInterp:\n" <> show ls)::String) $ catMaybes ls
+                    --let mp = Debug.trace (("####### WalletActionInterp:\n" <> show ls)::String) $ catMaybes ls
+                    --let mp = Debug.trace (("####### WalletActionInterp:\n")::String) $ catMaybes ls
+                    --void $ print mp
+                    --return ()
                     --let mp = catMaybes ls
-                    mapM_ (Kernel.applyBlock w) mp
---}
+                    --mapM_ (Kernel.applyBlock w) mp
+
                  , Actions.switchToFork = \_ (OldestFirst blunds) -> do
                      -- Get the hash of the last main block before this fork.
                      let almostOldest = fst (NE.head blunds)
@@ -233,6 +236,7 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
         case inProgressHeader of
             [h1, h2] -> do
                 blocksDowloaded <- walletGetBlocks walletDiffusion nodeId h2 (take 1 consumedHeader)
+                --void $ print "-------------- after blocksDowloaded "
                 let accomodatedHeaders =  map (headerHash . getBlockHeader) $ getOldestFirst blocksDowloaded
                     --void $ print "currentHeaders :  "
                     --void $ print accomodatedHeaders
@@ -251,6 +255,7 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
                              $ getOldestFirst blocksDowloaded
                     --void $ print "slotId :  "
                     --void $ print slotId
+                --void $ print "-------------- end tick 1a "
                 -- TO DO make sure utxo is updated every pass, no in the end
                 let txPayload = map (\case
                                             Right block ->
@@ -264,9 +269,21 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
                                             Left _  -> Nothing
                                     )
                                 $ getOldestFirst blocksDowloaded
-                    --void $ print "txPayload :  "
-                    --void $ print txPayload
+                --void $ print "txPayload :  "
+                {--let uuu = map (\case
+                                      Just res -> Just $ (snd . snd) res
+                                      Nothing -> Nothing
+                              ) txPayload
+                void $ print "uuu :  "
+                void $ print uuu
+                void $ print "uuu1 :  "
+                let uuu1 = map (\case
+                                      Just res -> Just $ List.nub $ Map.keys res
+                                      Nothing -> Nothing
+                              ) uuu
+                void $ print uuu1--}
                 now <- getCurrentTimestamp
+
                     --void $ print now
                 let createBlockContext arg1 arg2 arg3 =
                         if (arg2 == arg3) then
@@ -280,8 +297,13 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
                             resolvedTxOut = (fst . snd) payload
                             theUtxo = (snd . snd) payload
                         in ResolvedTx (InDb $ NE.fromList $ zip resolvedTxIn resolvedTxOut) (InDb theUtxo) (InDb $ (txIn,time))
-                let  resolvedTxs =
+                {--let  resolvedTxs =
                          map (\payload -> case List.nub (fst payload) of
+                                              [(TxInUtxo justOne _)]  -> Just $ createResolvedTx justOne payload now
+                                              _ -> Nothing
+                             ) $ catMaybes txPayload--}
+                let  resolvedTxs =
+                         map (\payload -> case List.take 1 $ Map.keys ((snd . snd) payload) of
                                               [(TxInUtxo justOne _)]  -> Just $ createResolvedTx justOne payload now
                                               _ -> Nothing
                              ) $ catMaybes txPayload
@@ -295,14 +317,13 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
                                 ResolvedBlock [] bCtx now
                 let resolvedBlocks = List.zipWith createResolvedBlock resolvedTxs context
                 --void $ print resolvedBlocks
-
                 mapM_ (Kernel.applyBlock passiveWallet) resolvedBlocks
-
-                --void $ print "-------------- end tick 1 "
+                --void $ print "-------------- end tick 1c "
                 let utxoToAdd = map (snd . snd) $ catMaybes txPayload
                 let utxoAfterAddition = utxoUnions $ utxo : utxoToAdd
                 let utxoSetToDel = Set.fromList $ concatMap fst (catMaybes txPayload)
                 let updatedUtxo = utxoRemoveInputs utxoAfterAddition utxoSetToDel
+                --void $ print "-------------- end tick 1 "
                 pure $ (([h1], (reverse accomodatedHeaders) ++ consumedHeader), updatedUtxo)
             _ -> do
                 --void $ print "-------------- end tick 2 "
