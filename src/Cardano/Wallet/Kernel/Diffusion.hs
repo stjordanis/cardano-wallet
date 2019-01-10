@@ -1,23 +1,28 @@
-{-# OPTIONS_GHC -fno-warn-type-defaults #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 module Cardano.Wallet.Kernel.Diffusion (
     WalletDiffusion(..)
   , fromDiffusion
+  , tickDiffusionLayer
   ) where
 
 import           Universum
 
+import           Control.Concurrent (threadDelay)
 import qualified Data.Map.Strict as Map
+import           Formatting (sformat, (%))
+import qualified Formatting as F
 
 import           Pos.Chain.Block (Block, BlockHeader, HeaderHash, prevBlockL)
-import           Pos.Chain.Txp (TxAux)
+import           Pos.Chain.Txp (TxAux, Utxo)
 import           Pos.Core ()
 import           Pos.Core.Chrono (OldestFirst (..))
-import           Pos.DB.Block
+import           Pos.DB.Block (MonadBlockVerify)
 import           Pos.Infra.Communication.Types.Protocol (NodeId)
 import           Pos.Infra.Diffusion.Subscription.Status (SubscriptionStatus,
                      ssMap)
 import           Pos.Infra.Diffusion.Types
+import           Pos.Util.Wlog (Severity (..))
 
 
 -- | Wallet diffusion layer
@@ -65,51 +70,65 @@ fromDiffusion nat d = WalletDiffusion {
     , walletRequestTip            = do
            fromDiff <- nat $ requestTip d
            pure $ Map.map nat fromDiff
-    , walletGetBlocks             =
-            let
-                getPrevBlock
-                    :: NodeId
-                    -> HeaderHash
-                    -> Maybe HeaderHash
-                    -> [Block]
-                    -> m (OldestFirst [] Block)
-                getPrevBlock nodeId from toMaybe blocksInThisBatch = do
-                    --void $ print "*********"
-                    --void $ print from
-                    --void $ print toMaybe
-                    --void $ print "*********"
-                    downloadedBlock <- getBlocks d nodeId from [from]
-                    let downloadedBlockStripped = getOldestFirst downloadedBlock
-                    --void $ print toMaybe
-                    case downloadedBlockStripped of
-                        [block@(Right _)] -> do
-                            -- here we are dealing with MainBlock
-                            --void $ print "Right"
-                            let prevBlockHeader = block ^. prevBlockL
-                            --void $ print prevBlockHeader
-                            case toMaybe of
-                                Just upToHeader ->
-                                    if (prevBlockHeader /= upToHeader) then
-                                        -- still need to download backwards
-                                        getPrevBlock nodeId prevBlockHeader toMaybe (block : blocksInThisBatch)
-                                    else
-                                    -- we just downloaded the last missing block
-                                        pure $ OldestFirst $ block : blocksInThisBatch  --
-                                Nothing -> do
-                                    getPrevBlock nodeId prevBlockHeader Nothing (block : blocksInThisBatch)  --
-                        [(Left _)] -> do
-                            -- here we come to the GenesisBlock, we stop and we do not want to include it in a batch
-                            --void $ print "Left"
-                            pure $ OldestFirst blocksInThisBatch --
-                        _ -> do
-                            -- unexpected so returning current blocks in the batch
-                            --void $ print "N"
-                            pure $ OldestFirst blocksInThisBatch --
-            in
-            \nodeId from toNotIncluding -> do
-                 case toNotIncluding of
-                     [lastConsumedHeader] -> do
-                         nat $ getPrevBlock nodeId from (Just lastConsumedHeader) []
-                     _ -> do
-                         nat $ getPrevBlock nodeId from Nothing []
+    , walletGetBlocks             = \nodeId from toNotIncluding -> do
+            case toNotIncluding of
+                [lastConsumedHeader] ->
+                    nat $ getPrevBlock nodeId from (Just lastConsumedHeader) []
+                _ ->
+                    nat $ getPrevBlock nodeId from Nothing []
     }
+    where
+        getPrevBlock
+            :: NodeId
+            -> HeaderHash
+            -> Maybe HeaderHash
+            -> [Block]
+            -> m (OldestFirst [] Block)
+        getPrevBlock nodeId from toMaybe blocksInThisBatch = do
+            blocks <- getOldestFirst <$> getBlocks d nodeId from [from]
+            case blocks of
+                [block@(Right _)] -> do
+                    -- here we are dealing with MainBlock
+                    let prevBlockHeader = block ^. prevBlockL
+                    case toMaybe of
+                        Just upToHeader ->
+                            if (prevBlockHeader /= upToHeader) then
+                                -- still need to download backwards
+                                getPrevBlock nodeId prevBlockHeader toMaybe (block : blocksInThisBatch)
+                            else
+                                -- we just downloaded the last missing block
+                                pure $ OldestFirst $ block : blocksInThisBatch
+                        Nothing -> do
+                            getPrevBlock nodeId prevBlockHeader Nothing (block : blocksInThisBatch)
+                _ -> do
+                    -- here we come to the GenesisBlock, we stop and we do not want to include it in a batch
+                    pure $ OldestFirst blocksInThisBatch
+
+
+tickDiffusionLayer
+    :: forall m. (MonadCatch m, MonadIO m)
+    => (Severity -> Text -> m ())
+       -- ^ A logging function
+    -> ( (Severity -> Text -> m ()) -> (([HeaderHash],[HeaderHash]),Utxo) -> m (([HeaderHash],[HeaderHash]), Utxo) )
+       -- ^ A function to call at each 'tick' of the worker.
+       -- This callback will be responsible for doing any pre
+       -- and post processing of the state.
+    -> (([HeaderHash],[HeaderHash]),Utxo)
+    -> m ()
+tickDiffusionLayer logFunction tick initialState =
+    go initialState
+    `catch`
+    (\(e :: SomeException) ->
+            let msg = "Terminating tickDiffusionLayer due to " % F.shown
+            in logFunction Error (sformat msg e)
+    )
+    where
+      go :: (([HeaderHash],[HeaderHash]), Utxo) -> m ()
+      go previousState  = do
+          logFunction Debug "ticking the slot in the diffusion layer..."
+          currentState <- tick logFunction previousState
+          liftIO $ threadDelay tickDiffusionRate
+          go currentState
+
+tickDiffusionRate :: Int
+tickDiffusionRate = 1000000

@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-type-defaults #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
@@ -47,12 +46,12 @@ import qualified Cardano.Wallet.Kernel.DB.Read as Kernel
 import           Cardano.Wallet.Kernel.DB.Resolved (ResolvedBlock (..),
                      ResolvedTx (..))
 import qualified Cardano.Wallet.Kernel.DB.Util.IxSet as IxSet
-import           Cardano.Wallet.Kernel.Diffusion (WalletDiffusion (..))
+import           Cardano.Wallet.Kernel.Diffusion (WalletDiffusion (..),
+                     tickDiffusionLayer)
 import           Cardano.Wallet.Kernel.Keystore (Keystore)
 import           Cardano.Wallet.Kernel.NodeStateAdaptor
 import qualified Cardano.Wallet.Kernel.Read as Kernel
 import qualified Cardano.Wallet.Kernel.Restore as Kernel
-import           Cardano.Wallet.Kernel.Submission.Worker (tickDiffusionLayer)
 import           Cardano.Wallet.Kernel.Util.Core (txOuts, utxoRemoveInputs,
                      utxoUnions)
 import           Cardano.Wallet.WalletLayer (ActiveWalletLayer (..),
@@ -65,7 +64,6 @@ import qualified Cardano.Wallet.WalletLayer.Kernel.Transactions as Transactions
 import qualified Cardano.Wallet.WalletLayer.Kernel.Wallets as Wallets
 
 
---import qualified Debug.Trace as Debug
 -- | Initialize the passive wallet.
 -- The passive wallet cannot send new transactions.
 bracketPassiveWallet
@@ -100,29 +98,8 @@ bracketPassiveWallet pm mode logFunction keystore node fInjects f = do
 
       -- Start the wallet worker
       let wai = Actions.WalletActionInterp
-                 --{ Actions.applyBlocks = \blunds -> do
                 { Actions.applyBlocks = \_ -> do
                     return ()
-
-                    --ls <- mapM (Wallets.blundToResolvedBlock node)
-                    --    (toList (getOldestFirst blunds))
-                    --let mp = Debug.trace (("WalletActionInterp:\n " <> show blunds)::String) $ catMaybes ls
-                    --let bs = map (\(b,_)-> b) $ toList (getOldestFirst blunds) ---
-                    --let hash = map (\(b,_)-> view mainBlockSlot b) $ toList (getOldestFirst blunds) ---
-                    --let bs = map (\(_,u)-> u) $ toList (getOldestFirst blunds) ---
-                    --let bs = map (\(b,_)-> (headerHash . getBlockHeader) b) $ toList (getOldestFirst blunds) ---
-                    --let mp = Debug.trace (("####### WalletActionInterp:\n" <> show bs)::String) $ catMaybes ls
-                    {--let resolved = map (\b -> case b of
-                                               (Just block) -> _rbTxs block
-                                               Nothing      -> []
-                                       ) ls--}
-                    --let mp = Debug.trace (("####### WalletActionInterp:\n" <> show ls)::String) $ catMaybes ls
-                    --let mp = Debug.trace (("####### WalletActionInterp:\n")::String) $ catMaybes ls
-                    --void $ print mp
-                    --return ()
-                    --let mp = catMaybes ls
-                    --mapM_ (Kernel.applyBlock w) mp
-
                  , Actions.switchToFork = \_ (OldestFirst blunds) -> do
                      -- Get the hash of the last main block before this fork.
                      let almostOldest = fst (NE.head blunds)
@@ -198,18 +175,18 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
 
         genesisConfig <- liftIO $ getCoreConfig $ passiveWallet ^. Kernel.walletNode
         let initialUtxo = ccUtxo $ initCardanoContext genesisConfig
+        let logging = passiveWallet ^. Kernel.walletLogMessage
 
         applyingBlockTicker <- liftIO $ async $
             tickDiffusionLayer
-            (passiveWallet ^. Kernel.walletLogMessage)
+            logging
             tickDiffusionFunction
             (([],[]), initialUtxo)
 
         bracket
           (return (activeWalletLayer w))
-          --(\_ -> return ())
           (\_ -> liftIO $ do
-                  (passiveWallet ^. Kernel.walletLogMessage) Error "stopping the wallet applying block layer..."
+                  logging Error "stopping the wallet applying block layer..."
                   cancel applyingBlockTicker
           )
           (flip runActiveLayer w)
@@ -225,106 +202,99 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
         }
 
     tickDiffusionFunction
-        :: (([HeaderHash], [HeaderHash]), Utxo)
+        :: (Severity -> Text -> IO ())
+        -> (([HeaderHash], [HeaderHash]), Utxo)
         -> IO (([HeaderHash], [HeaderHash]), Utxo)
-    tickDiffusionFunction ((inProgressHeader, consumedHeader),utxo) = do
-        nodeBlockHeaderMap <- walletRequestTip walletDiffusion
-        let [(nodeId, headerIO)] = Map.toList nodeBlockHeaderMap
-        header <- headerIO
-        --void $ print "-------------- tick"
+    tickDiffusionFunction logging currentState@((inProgressHeaders, consumedHeaders),utxo) = do
 
-        case inProgressHeader of
-            [h1, h2] -> do
-                blocksDowloaded <- walletGetBlocks walletDiffusion nodeId h2 (take 1 consumedHeader)
-                --void $ print "-------------- after blocksDowloaded "
-                let accomodatedHeaders =  map (headerHash . getBlockHeader) $ getOldestFirst blocksDowloaded
-                    --void $ print "currentHeaders :  "
-                    --void $ print accomodatedHeaders
-                    --let prevHeaders =  map (\block -> block ^. prevBlockL) $ getOldestFirst blocksDowloaded
-                -- TO-DO what if GenesisBlock is in the middle
-                    -- now handle the case if it is the oldest
-                    --void $ print "prevHeaders :  "
-                let prevHeaders = case consumedHeader of
+        nodeBlockHeaderMap <- walletRequestTip walletDiffusion
+
+        case (List.take 1 $ Map.toList nodeBlockHeaderMap, inProgressHeaders) of
+
+            ([(nodeId, _)], [h1, h2]) -> do
+                --downloading blocks
+                blocksDowloaded <- getOldestFirst <$> walletGetBlocks walletDiffusion nodeId h2 (take 1 consumedHeaders)
+
+                let accomodatedHeaders =  map (headerHash . getBlockHeader) $ blocksDowloaded
+
+                let prevHeaders = case consumedHeaders of
                                       [] -> (take 1 accomodatedHeaders) ++ ((reverse . drop 1 . reverse) accomodatedHeaders)
                                       cs -> (take 1 cs) ++ ((reverse . drop 1 . reverse) accomodatedHeaders)
-                    --void $ print prevHeaders
-                let slotId = map (\case
-                                         Right block -> Just $ block ^. mainBlockSlot
-                                         Left _  -> Nothing
-                                 )
-                             $ getOldestFirst blocksDowloaded
-                    --void $ print "slotId :  "
-                    --void $ print slotId
-                --void $ print "-------------- end tick 1a "
-                -- TO DO make sure utxo is updated every pass, no in the end
-                let txPayload = map (\case
-                                            Right block ->
-                                                let transactionsInBlock = block ^. mainBlockTxPayload . txpTxs
-                                                    outputs = utxoUnions $ map txOuts transactionsInBlock
-                                                    inputs = map _txInputs transactionsInBlock
-                                                    inputsToRemove = concatMap toList inputs
-                                                    findUtxo = utxoToLookup utxo
-                                                    inputsE = concatMap ((mapMaybe findUtxo) . toList) inputs
-                                                in Just (inputsToRemove, (inputsE, outputs))
-                                            Left _  -> Nothing
-                                    )
-                                $ getOldestFirst blocksDowloaded
-                --void $ print "txPayload :  "
-                {--let uuu = map (\case
-                                      Just res -> Just $ (snd . snd) res
-                                      Nothing -> Nothing
-                              ) txPayload
-                void $ print "uuu :  "
-                void $ print uuu
-                void $ print "uuu1 :  "
-                let uuu1 = map (\case
-                                      Just res -> Just $ List.nub $ Map.keys res
-                                      Nothing -> Nothing
-                              ) uuu
-                void $ print uuu1--}
+
+                let slotIdsM =  map createSlotIdM blocksDowloaded
+
+                let txPayload = map processBlockTx blocksDowloaded
+
                 now <- getCurrentTimestamp
 
-                    --void $ print now
-                let createBlockContext arg1 arg2 arg3 =
-                        if (arg2 == arg3) then
-                            BlockContext (InDb $ arg1) (InDb $ arg2) (StrictMaybe.Nothing)
-                        else
-                            BlockContext (InDb $ arg1) (InDb $ arg2) (StrictMaybe.Just (InDb $ arg3))
-                let context = List.zipWith3 createBlockContext (catMaybes slotId) accomodatedHeaders prevHeaders
-                    --void $ print context
-                let createResolvedTx txIn payload time =
-                        let resolvedTxIn = fst payload
-                            resolvedTxOut = (fst . snd) payload
-                            theUtxo = (snd . snd) payload
-                        in ResolvedTx (InDb $ NE.fromList $ zip resolvedTxIn resolvedTxOut) (InDb theUtxo) (InDb $ (txIn,time))
-                {--let  resolvedTxs =
-                         map (\payload -> case List.nub (fst payload) of
-                                              [(TxInUtxo justOne _)]  -> Just $ createResolvedTx justOne payload now
-                                              _ -> Nothing
-                             ) $ catMaybes txPayload--}
-                let  resolvedTxs =
-                         map (\payload -> case List.take 1 $ Map.keys ((snd . snd) payload) of
-                                              [(TxInUtxo justOne _)]  -> Just $ createResolvedTx justOne payload now
-                                              _ -> Nothing
-                             ) $ catMaybes txPayload
-                    --void $ print resolvedTxs
-                let createResolvedBlock resTx bCtx =
-                        case resTx of
-                            Just resolvedTx ->
-                                let (_, timestamp) = _fromDb $ _rtxMeta resolvedTx
-                                in ResolvedBlock [resolvedTx] bCtx timestamp
-                            Nothing  ->
-                                ResolvedBlock [] bCtx now
-                let resolvedBlocks = List.zipWith createResolvedBlock resolvedTxs context
-                --void $ print resolvedBlocks
+                let context = List.zipWith3 createBlockContext (catMaybes slotIdsM) accomodatedHeaders prevHeaders
+
+                let resolvedTxs = map (payloadToResolved now) $ catMaybes txPayload
+
+                let resolvedBlocks = List.zipWith (createResolvedBlock now) resolvedTxs context
+
                 mapM_ (Kernel.applyBlock passiveWallet) resolvedBlocks
-                --void $ print "-------------- end tick 1c "
-                let utxoToAdd = map (snd . snd) $ catMaybes txPayload
-                let utxoAfterAddition = utxoUnions $ utxo : utxoToAdd
-                let utxoSetToDel = Set.fromList $ concatMap fst (catMaybes txPayload)
-                let updatedUtxo = utxoRemoveInputs utxoAfterAddition utxoSetToDel
-                --void $ print "-------------- end tick 1 "
-                pure $ (([h1], (reverse accomodatedHeaders) ++ consumedHeader), updatedUtxo)
+
+                pure $ (([h1], (reverse accomodatedHeaders) ++ consumedHeaders), updateUtxo txPayload utxo)
+
+            ([(_, headerIO)],_) -> do
+                --collecting headers
+                headerHashE <- try ( headerHash <$> headerIO ) :: IO (Either SomeException HeaderHash)
+                case headerHashE of
+                    Right header -> do
+                        pure $ ((List.nub $ header : inProgressHeaders, consumedHeaders), utxo)
+                    Left exep -> do
+                        logging Error (show exep)
+                        pure $ currentState
+
             _ -> do
-                --void $ print "-------------- end tick 2 "
-                pure $ ((List.nub $ (headerHash header) : inProgressHeader, consumedHeader), utxo)
+                -- no communication
+                pure $ currentState
+            where
+                updateUtxo payload theUtxo =
+                    let utxoAfterAddition = utxoUnions $ theUtxo : (map (snd . snd) $ catMaybes payload)
+                        utxoSetToDel = Set.fromList $ concatMap fst (catMaybes payload)
+                    in  utxoRemoveInputs utxoAfterAddition utxoSetToDel
+
+                createBlockContext slotId header1 header2 =
+                    if (header1 == header2) then
+                        BlockContext (InDb $ slotId) (InDb $ header1) (StrictMaybe.Nothing)
+                    else
+                        BlockContext (InDb $ slotId) (InDb $ header1) (StrictMaybe.Just (InDb $ header2))
+
+                createResolvedTx txIn payload time =
+                    let resolvedTxIn = fst payload
+                        resolvedTxOut = (fst . snd) payload
+                        theUtxo = (snd . snd) payload
+                    in ResolvedTx (InDb $ NE.fromList $ zip resolvedTxIn resolvedTxOut) (InDb theUtxo) (InDb $ (txIn,time))
+
+                createResolvedBlock time resTx bCtx  =
+                    case resTx of
+                        Just resolvedTx ->
+                            let (_, timestamp) = _fromDb $ _rtxMeta resolvedTx
+                            in ResolvedBlock [resolvedTx] bCtx timestamp
+                        Nothing  ->
+                            ResolvedBlock [] bCtx time
+
+                createSlotIdM = (\case
+                                        Right block -> Just $ block ^. mainBlockSlot
+                                        Left _  -> Nothing
+                                )
+
+                processBlockTx = (\case
+                                         Right block ->
+                                             let transactionsInBlock = block ^. mainBlockTxPayload . txpTxs
+                                                 outputs = utxoUnions $ map txOuts transactionsInBlock
+                                                 inputs = map _txInputs transactionsInBlock
+                                                 inputsToRemove = concatMap toList inputs
+                                                 findUtxo = utxoToLookup utxo
+                                                 inputsE = concatMap ((mapMaybe findUtxo) . toList) inputs
+                                             in Just (inputsToRemove, (inputsE, outputs))
+                                         Left _  -> Nothing
+                                 )
+
+                payloadToResolved time = (\payload ->
+                                              case List.take 1 $ Map.keys ((snd . snd) payload) of
+                                                  [(TxInUtxo justOne _)]  -> Just $ createResolvedTx justOne payload time
+                                                  _ -> Nothing
+                                         )
