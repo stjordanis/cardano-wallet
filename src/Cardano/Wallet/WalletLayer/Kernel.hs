@@ -176,12 +176,13 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
         genesisConfig <- liftIO $ getCoreConfig $ passiveWallet ^. Kernel.walletNode
         let initialUtxo = ccUtxo $ initCardanoContext genesisConfig
         let logging = passiveWallet ^. Kernel.walletLogMessage
+        let headersConsumed = passiveWallet ^. Kernel.walletProcessedBlocks
 
         applyingBlockTicker <- liftIO $ async $
             tickDiffusionLayer
             logging
             tickDiffusionFunction
-            (([],[]), initialUtxo)
+            (([],headersConsumed), initialUtxo)
 
         bracket
           (return (activeWalletLayer w))

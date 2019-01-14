@@ -19,6 +19,7 @@ module Cardano.Wallet.Kernel (
     , walletLogMessage
     , walletPassive
     , walletMeta
+    , walletProcessedBlocks
       -- * Active wallet
     , ActiveWallet -- opaque
     , bracketActiveWallet
@@ -181,6 +182,7 @@ initPassiveWallet pm logMessage keystore handles node fInjects = do
                 , _walletSubmission      = submission
                 , _walletRestorationTask = restore
                 , _walletFInjects        = fInjects
+                , _walletProcessedBlocks = []
                 }
 
         -- | Since the submission layer state is not persisted, we need to initialise
