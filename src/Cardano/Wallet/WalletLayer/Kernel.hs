@@ -224,7 +224,7 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
 
                 let slotIdsM =  map createSlotIdM blocksDowloaded
 
-                let txPayload = map processBlockTx blocksDowloaded
+                let (txPayload, updatedUtxo) = foldl processBlockTx ([],utxo) blocksDowloaded
 
                 now <- getCurrentTimestamp
 
@@ -236,7 +236,7 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
 
                 mapM_ (Kernel.applyBlock passiveWallet) resolvedBlocks
 
-                pure $ (([h1], (reverse accomodatedHeaders) ++ consumedHeaders), updateUtxo txPayload utxo)
+                pure $ (([h1], (reverse accomodatedHeaders) ++ consumedHeaders), updatedUtxo)
 
             ([(_, headerIO)],_) -> do
                 --collecting headers
@@ -282,17 +282,19 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
                                         Left _  -> Nothing
                                 )
 
-                processBlockTx = (\case
-                                         Right block ->
-                                             let transactionsInBlock = block ^. mainBlockTxPayload . txpTxs
-                                                 outputs = utxoUnions $ map txOuts transactionsInBlock
-                                                 inputs = map _txInputs transactionsInBlock
-                                                 inputsToRemove = concatMap toList inputs
-                                                 findUtxo = utxoToLookup utxo
-                                                 inputsE = concatMap ((mapMaybe findUtxo) . toList) inputs
-                                             in Just (inputsToRemove, (inputsE, outputs))
-                                         Left _  -> Nothing
-                                 )
+                processBlockTx (payloads,currentUtxo) theBlock =
+                    case theBlock of
+                        Right block ->
+                            let transactionsInBlock = block ^. mainBlockTxPayload . txpTxs
+                                outputs = utxoUnions $ map txOuts transactionsInBlock
+                                inputs = map _txInputs transactionsInBlock
+                                inputsToRemove = concatMap toList inputs
+                                findUtxo = utxoToLookup currentUtxo
+                                inputsE = concatMap ((mapMaybe findUtxo) . toList) inputs
+                                payloadToAdd = [Just (inputsToRemove, (inputsE, outputs))]
+                                updatedUtxo = updateUtxo payloadToAdd currentUtxo
+                            in (Just (inputsToRemove, (inputsE, outputs)) : payloads,updatedUtxo)
+                        Left _  -> (Nothing : payloads,currentUtxo)
 
                 payloadToResolved time = (\payload ->
                                               case List.take 1 $ Map.keys ((snd . snd) payload) of
