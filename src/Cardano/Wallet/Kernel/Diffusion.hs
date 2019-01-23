@@ -99,9 +99,9 @@ fromDiffusion nat d = WalletDiffusion {
                                 -- we just downloaded the last missing block
                                 pure $ OldestFirst $ block : blocksInThisBatch
                         Nothing -> do
-                            getPrevBlock nodeId prevBlockHeader Nothing (block : blocksInThisBatch)
+                            -- just one block downloaded
+                            pure $ OldestFirst (block : blocksInThisBatch)
                 _ -> do
-                    -- here we come to the GenesisBlock, we stop and we do not want to include it in a batch
                     pure $ OldestFirst blocksInThisBatch
 
 
