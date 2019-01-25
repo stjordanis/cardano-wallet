@@ -70,12 +70,13 @@ bracketPassiveWallet
     :: forall m n a. (MonadIO n, MonadUnliftIO m, MonadMask m)
     => ProtocolMagic
     -> Kernel.DatabaseMode
+    -> Bool
     -> (Severity -> Text -> IO ())
     -> Keystore
     -> NodeStateAdaptor IO
     -> FInjects IO
     -> (PassiveWalletLayer n -> Kernel.PassiveWallet -> m a) -> m a
-bracketPassiveWallet pm mode logFunction keystore node fInjects f = do
+bracketPassiveWallet pm mode usePullMechanism logFunction keystore node fInjects f = do
     Kernel.bracketPassiveWallet pm mode logFunction keystore node fInjects $ \w -> do
 
       -- For each wallet in a restoration state, re-start the background
@@ -98,8 +99,16 @@ bracketPassiveWallet pm mode logFunction keystore node fInjects f = do
 
       -- Start the wallet worker
       let wai = Actions.WalletActionInterp
-                { Actions.applyBlocks = \_ -> do
-                    return ()
+                { Actions.applyBlocks =
+                  if usePullMechanism then
+                      \_ -> return ()
+                  else
+                      \blunds -> do
+                          ls <- mapM (Wallets.blundToResolvedBlock node)
+                              (toList (getOldestFirst blunds))
+                          let mp = catMaybes ls
+                          mapM_ (Kernel.applyBlock w) mp
+
                  , Actions.switchToFork = \_ (OldestFirst blunds) -> do
                      -- Get the hash of the last main block before this fork.
                      let almostOldest = fst (NE.head blunds)
@@ -169,28 +178,40 @@ bracketActiveWallet
     => PassiveWalletLayer n
     -> Kernel.PassiveWallet
     -> WalletDiffusion
+    -> Bool
     -> (ActiveWalletLayer n -> Kernel.ActiveWallet -> m a) -> m a
-bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLayer =
-    Kernel.bracketActiveWallet passiveWallet walletDiffusion $ \w -> do
+bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion walletApplyBlockPullMechanism runActiveLayer =
+    Kernel.bracketActiveWallet passiveWallet walletDiffusion $ \w ->
 
-        genesisConfig <- liftIO $ getCoreConfig $ passiveWallet ^. Kernel.walletNode
-        let initialUtxo = ccUtxo $ initCardanoContext genesisConfig
-        let logging = passiveWallet ^. Kernel.walletLogMessage
-        let headersConsumed = passiveWallet ^. Kernel.walletProcessedBlocks
+        if walletApplyBlockPullMechanism then do
 
-        applyingBlockTicker <- liftIO $ async $
-            tickDiffusionLayer
-            logging
-            tickDiffusionFunction
-            (([],headersConsumed), initialUtxo)
+            liftIO $ logging Debug "pull mechanism for block application is active"
 
-        bracket
-          (return (activeWalletLayer w))
-          (\_ -> liftIO $ do
-                  logging Error "stopping the wallet applying block layer..."
-                  cancel applyingBlockTicker
-          )
-          (flip runActiveLayer w)
+            genesisConfig <- liftIO $ getCoreConfig $ passiveWallet ^. Kernel.walletNode
+            let initialUtxo = ccUtxo $ initCardanoContext genesisConfig
+            let headersConsumed = passiveWallet ^. Kernel.walletProcessedBlocks
+
+            applyingBlockTicker <- liftIO $ async $
+                tickDiffusionLayer
+                logging
+                tickDiffusionFunction
+                (([],headersConsumed), initialUtxo)
+
+            bracket
+                (return (activeWalletLayer w))
+                (\_ -> liftIO $ do
+                    logging Error "stopping the wallet applying block layer..."
+                    cancel applyingBlockTicker
+                )
+                (flip runActiveLayer w)
+         else do
+
+            liftIO $ logging Debug "push mechanism for block application is active"
+
+            bracket
+                (return (activeWalletLayer w))
+                (\_ -> return ())
+                (flip runActiveLayer w)
   where
     activeWalletLayer :: Kernel.ActiveWallet -> ActiveWalletLayer n
     activeWalletLayer w = ActiveWalletLayer {
@@ -202,11 +223,14 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
         , redeemAda          = Active.redeemAda        w
         }
 
+    logging :: Severity -> Text -> IO ()
+    logging = passiveWallet ^. Kernel.walletLogMessage
+
     tickDiffusionFunction
         :: (Severity -> Text -> IO ())
         -> (([HeaderHash], [HeaderHash]), Utxo)
         -> IO (([HeaderHash], [HeaderHash]), Utxo)
-    tickDiffusionFunction logging currentState@((inProgressHeaders, consumedHeaders),utxo) = do
+    tickDiffusionFunction log currentState@((inProgressHeaders, consumedHeaders),utxo) = do
 
         nodeBlockHeaderMap <- walletRequestTip walletDiffusion
 
@@ -245,7 +269,7 @@ bracketActiveWallet walletPassiveLayer passiveWallet walletDiffusion runActiveLa
                     Right header -> do
                         pure $ ((List.nub $ header : inProgressHeaders, consumedHeaders), utxo)
                     Left exep -> do
-                        logging Error (show exep)
+                        log Error (show exep)
                         pure $ currentState
 
             _ -> do

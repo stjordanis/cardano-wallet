@@ -108,7 +108,7 @@ apiServer
             <> show err
         Right _ -> do
             logInfo "The node responded successfully."
-    WalletLayer.Kernel.bracketActiveWallet passiveLayer passiveWallet diffusion' $ \active _ -> do
+    WalletLayer.Kernel.bracketActiveWallet passiveLayer passiveWallet diffusion' walletApplyBlockPullMechanism $ \active _ -> do
         ctx <- view shutdownContext
         serveImpl
             (getApplication active)
