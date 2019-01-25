@@ -60,7 +60,6 @@ import qualified Cardano.Wallet.WalletLayer.Kernel as WalletLayer.Kernel
 
 import           Data.Reflection (Given (..))
 import           Pos.Chain.Ssc (SscConfiguration, sscConfiguration)
-import           Pos.Chain.Update (cpsSoftwareVersion)
 import           Pos.Infra.Diffusion.Types (Diffusion (..))
 import           Pos.Infra.Shutdown (HasShutdownContext (shutdownContext),
                      ShutdownContext)
